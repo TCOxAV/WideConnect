@@ -1,0 +1,3 @@
+module github.com/TCOxAV/WideConnect
+
+go 1.27.3
