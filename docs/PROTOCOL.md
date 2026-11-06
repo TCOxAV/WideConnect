@@ -33,3 +33,20 @@ Header is a fixed 8 bytes.
 - A receiver MUST close the connection on bad magic or unsupported version.
 - A receiver MUST reject frames whose Length exceeds 16 MiB.
 - PING/PONG payload is an 8-byte unsigned nanosecond timestamp; PONG echoes it unchanged.
+
+## HELLO payload (0x01)
+
+| Offset | Size | Field        | Description                             |
+|--------|------|--------------|-----------------------------------------|
+| 0      | 16   | DeviceID     | Random, persistent per device           |
+| 16     | 1    | Platform     | 1=Linux, 2=Windows, 3=Android           |
+| 17     | 4    | Capabilities | Bitmask: 1=Notify, 2=Files, 4=Screen    |
+| 21     | 1    | NameLen      | N, max 64                               |
+| 22     | N    | Name         | UTF-8 device name                       |
+
+## Handshake
+
+1. The connecting side sends HELLO immediately after the TCP connection opens.
+2. The accepting side validates it and replies with its own HELLO.
+3. No other frame type is valid until both HELLOs are exchanged.
+4. The accepting side MUST close the connection if no valid HELLO arrives within 5 seconds.
