@@ -33,6 +33,7 @@ Header is a fixed 8 bytes.
 - A receiver MUST close the connection on bad magic or unsupported version.
 - A receiver MUST reject frames whose Length exceeds 16 MiB.
 - PING/PONG payload is an 8-byte unsigned nanosecond timestamp; PONG echoes it unchanged.
+- Pairing and auth payloads have exact fixed lengths. A receiver MUST close the connection on any other length, and on a PAIR_DECISION byte other than 0 or 1.
 
 ## HELLO payload (0x01)
 
@@ -50,3 +51,10 @@ Header is a fixed 8 bytes.
 2. The accepting side validates it and replies with its own HELLO.
 3. No other frame type is valid until both HELLOs are exchanged.
 4. The accepting side MUST close the connection if no valid HELLO arrives within 5 seconds.
+
+| 0x40 | PAIR_REQUEST   | initiator→responder | Commitment (32 bytes)               |
+| 0x41 | PAIR_RESPONSE  | responder→initiator | Public key (32) + nonce (16)        |
+| 0x42 | PAIR_REVEAL    | initiator→responder | Public key (32) + nonce (16)        |
+| 0x43 | PAIR_DECISION  | both                | 1 byte: 1 accept, 0 reject          |
+| 0x44 | AUTH_CHALLENGE | both                | Challenge (16 bytes)                |
+| 0x45 | AUTH_RESPONSE  | both                | Ed25519 signature (64 bytes)        |

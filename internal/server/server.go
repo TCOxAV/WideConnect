@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/TCOxAV/WideConnect/internal/identity"
 	"github.com/TCOxAV/WideConnect/protocol"
 )
 
@@ -23,13 +24,14 @@ const handshakeTimeout = 5 * time.Second
 // Server listens for WideConnect peers.
 type Server struct {
 	addr         string
+	id           identity.Identity
 	helloPayload []byte // our own HELLO, encoded once at startup
 	wg           sync.WaitGroup
 }
 
 // New returns a Server that will listen on addr (e.g. ":7777").
-func New(addr string) *Server {
-	return &Server{addr: addr}
+func New(addr string, id identity.Identity) *Server {
+	return &Server{addr: addr, id: id}
 }
 
 // session wraps a connection with a write lock, so several goroutines
@@ -47,12 +49,8 @@ func (s *session) send(f protocol.Frame) error {
 
 // buildHello creates this device's identity.
 // TODO: persist the DeviceID on disk so it survives restarts (needed for pairing).
-func buildHello() ([]byte, error) {
-	id, err := protocol.NewDeviceID()
-	if err != nil {
-		return nil, err
-	}
-
+// buildHello creates this device's HELLO payload from its persistent identity.
+func buildHello(id identity.Identity) ([]byte, error) {
 	name, err := os.Hostname()
 	if err != nil || name == "" {
 		name = "wideconnect"
@@ -70,7 +68,7 @@ func buildHello() ([]byte, error) {
 	}
 
 	h := protocol.Hello{
-		DeviceID: id,
+		DeviceID: id.DeviceID,
 		Platform: platform,
 		Caps:     protocol.CapNotify | protocol.CapFiles | protocol.CapScreen,
 		Name:     name,
@@ -97,7 +95,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 // Serve accepts connections on ln until ctx is cancelled.
 // It takes ownership of ln and closes it on shutdown.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
-	payload, err := buildHello()
+	payload, err := buildHello(s.id)
 	if err != nil {
 		ln.Close()
 		return fmt.Errorf("build hello: %w", err)

@@ -1,6 +1,8 @@
 package identity
 
 import (
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -9,6 +11,8 @@ import (
 	"strings"
 	"testing"
 )
+
+const goodID = "00112233445566778899aabbccddeeff"
 
 func TestCreateThenReload(t *testing.T) {
 	dir := t.TempDir()
@@ -20,16 +24,54 @@ func TestCreateThenReload(t *testing.T) {
 	if first.DeviceID == [len(first.DeviceID)]byte{} {
 		t.Fatal("created an all-zero device ID")
 	}
+	if first.PublicKey == [len(first.PublicKey)]byte{} {
+		t.Fatal("created an all-zero public key")
+	}
 
-	// Every later load must return the exact same ID.
 	for i := 0; i < 3; i++ {
 		again, err := LoadOrCreate(dir)
 		if err != nil {
 			t.Fatalf("reload %d: %v", i, err)
 		}
 		if again != first {
-			t.Fatalf("reload %d: id changed: got %s, want %s", i, again, first)
+			t.Fatalf("reload %d: identity changed: got %s, want %s", i, again, first)
 		}
+	}
+}
+
+func TestDeviceIDDerivedFromKey(t *testing.T) {
+	id, err := LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := DeviceIDFromPublicKey(id.PublicKey[:]); id.DeviceID != want {
+		t.Errorf("DeviceID = %x, want SHA-256(pub)[:16] = %x", id.DeviceID, want)
+	}
+}
+
+func TestSignAndVerify(t *testing.T) {
+	dir := t.TempDir()
+	id, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	msg := []byte("WC-AUTH-v1 test message")
+	sig := id.Sign(msg)
+	if !ed25519.Verify(id.PublicKey[:], msg, sig) {
+		t.Fatal("signature does not verify")
+	}
+	if ed25519.Verify(id.PublicKey[:], []byte("different message"), sig) {
+		t.Error("signature verified for a different message")
+	}
+
+	// After a restart the reloaded key must still match the same public key.
+	reloaded, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ed25519.Verify(id.PublicKey[:], msg, reloaded.Sign(msg)) {
+		t.Error("reloaded identity signs with a different key")
 	}
 }
 
@@ -67,50 +109,149 @@ func TestFilePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Errorf("file mode = %o, want 600", perm)
+		t.Errorf("file mode = %o, want 600 (it now holds a private key)", perm)
+	}
+}
+
+// expectErrorAndUntouched checks that LoadOrCreate fails on the file in dir,
+// does not claim the file is missing, and leaves it unmodified.
+func expectErrorAndUntouched(t *testing.T, dir, content string) {
+	t.Helper()
+	path := filepath.Join(dir, fileName)
+
+	_, err := LoadOrCreate(dir)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error wrongly reports a missing file: %v", err)
+	}
+
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("reading file back: %v", readErr)
+	}
+	if string(after) != content {
+		t.Errorf("file was modified: %q", after)
 	}
 }
 
 func TestRejectsBadFiles(t *testing.T) {
-	const goodID = "00112233445566778899aabbccddeeff"
-
 	cases := map[string]string{
-		"empty file":      "",
-		"not json":        "this is not json",
-		"missing version": `{"device_id": "` + goodID + `"}`,
-		"future version":  `{"version": 2, "device_id": "` + goodID + `"}`,
-		"missing id":      `{"version": 1}`,
-		"non-hex id":      `{"version": 1, "device_id": "` + strings.Repeat("z", 32) + `"}`,
-		"short id":        `{"version": 1, "device_id": "0011"}`,
-		"long id":         `{"version": 1, "device_id": "` + goodID + `00"}`,
+		"empty file":        "",
+		"not json":          "this is not json",
+		"missing version":   `{"device_id": "` + goodID + `"}`,
+		"future version":    `{"version": 3}`,
+		"legacy missing id": `{"version": 1}`,
+		"legacy non-hex id": `{"version": 1, "device_id": "` + strings.Repeat("z", 32) + `"}`,
+		"legacy short id":   `{"version": 1, "device_id": "0011"}`,
+		"v2 without keys":   `{"version": 2, "device_id": "` + goodID + `"}`,
 	}
 
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, fileName), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			expectErrorAndUntouched(t, dir, content)
+		})
+	}
+}
+
+func TestRejectsInconsistentV2(t *testing.T) {
+	other, err := LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPub := strings.ToLower(hexOf(other.PublicKey[:]))
+
+	mutations := map[string]func(m map[string]any){
+		"wrong public key":    func(m map[string]any) { m["public_key"] = otherPub },
+		"wrong device id":     func(m map[string]any) { m["device_id"] = goodID },
+		"non-hex private key": func(m map[string]any) { m["private_key"] = strings.Repeat("z", 64) },
+		"short private key":   func(m map[string]any) { m["private_key"] = "0011" },
+		"missing private key": func(m map[string]any) { delete(m, "private_key") },
+	}
+
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if _, err := LoadOrCreate(dir); err != nil {
+				t.Fatal(err)
+			}
 			path := filepath.Join(dir, fileName)
-			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			mutate(m)
+			bad, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, bad, 0o600); err != nil {
 				t.Fatal(err)
 			}
 
-			_, err := LoadOrCreate(dir)
-			if err == nil {
-				t.Fatal("expected an error, got nil")
-			}
-			// Must not look like "file missing", or callers might treat it as first run.
-			if errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("error wrongly reports a missing file: %v", err)
-			}
-
-			// The bad file must be left untouched, never silently replaced.
-			after, readErr := os.ReadFile(path)
-			if readErr != nil {
-				t.Fatalf("reading file back: %v", readErr)
-			}
-			if string(after) != content {
-				t.Errorf("file was modified: %q", after)
-			}
+			expectErrorAndUntouched(t, dir, string(bad))
 		})
+	}
+}
+
+func TestMigratesLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, fileName)
+	legacy := `{"version": 1, "device_id": "` + goodID + `"}` + "\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatalf("migration: %v", err)
+	}
+	if id.String() == goodID {
+		t.Error("device id should change when migrating to a keypair identity")
+	}
+	if id.PublicKey == [len(id.PublicKey)]byte{} {
+		t.Error("migrated identity has no public key")
+	}
+
+	// The file on disk is now version 2.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ff fileFormat
+	if err := json.Unmarshal(raw, &ff); err != nil {
+		t.Fatal(err)
+	}
+	if ff.Version != formatVersion {
+		t.Errorf("file version = %d, want %d", ff.Version, formatVersion)
+	}
+
+	// The old file was preserved byte for byte.
+	bak, err := os.ReadFile(path + backupSuffix)
+	if err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if string(bak) != legacy {
+		t.Errorf("backup = %q, want %q", bak, legacy)
+	}
+
+	// Migration happens once: later loads return the same identity.
+	again, err := LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != id {
+		t.Error("identity changed after migration")
 	}
 }
 
@@ -157,8 +298,8 @@ func TestDifferentDirsDifferentIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a == b {
-		t.Error("two fresh identities were identical")
+	if a == b || a.DeviceID == b.DeviceID || a.PublicKey == b.PublicKey {
+		t.Error("two fresh identities shared an ID or a key")
 	}
 }
 
@@ -183,7 +324,6 @@ func TestString(t *testing.T) {
 }
 
 func TestDefaultDir(t *testing.T) {
-	// Point the config dir at a temp location so the test is hermetic.
 	tmp := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmp)
 	t.Setenv("AppData", tmp)
@@ -195,4 +335,14 @@ func TestDefaultDir(t *testing.T) {
 	if filepath.Base(dir) != "wideconnect" {
 		t.Errorf("dir = %q, want it to end in wideconnect", dir)
 	}
+}
+
+func hexOf(b []byte) string {
+	const digits = "0123456789abcdef"
+	out := make([]byte, len(b)*2)
+	for i, c := range b {
+		out[i*2] = digits[c>>4]
+		out[i*2+1] = digits[c&0x0f]
+	}
+	return string(out)
 }

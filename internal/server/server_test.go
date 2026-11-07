@@ -11,13 +11,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TCOxAV/WideConnect/internal/identity"
 	"github.com/TCOxAV/WideConnect/protocol"
 )
 
 // startServer runs a server on a random local port. The returned stop
 // function shuts it down and waits for Serve to return; it is also
 // registered with t.Cleanup, and is safe to call more than once.
+// startServer runs a server with a fresh throwaway identity on a random
+// local port.
 func startServer(t *testing.T) (addr string, stop func()) {
+	t.Helper()
+	id, err := identity.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	return startServerWithID(t, id)
+}
+
+// startServerWithID runs a server that identifies itself as id. The returned
+// stop function shuts it down and waits for Serve to return; it is also
+// registered with t.Cleanup, and is safe to call more than once.
+func startServerWithID(t *testing.T, id identity.Identity) (addr string, stop func()) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -27,7 +42,7 @@ func startServer(t *testing.T) (addr string, stop func()) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- New("").Serve(ctx, ln) }()
+	go func() { done <- New("", id).Serve(ctx, ln) }()
 
 	var once sync.Once
 	stop = func() {
@@ -228,5 +243,55 @@ func TestConcurrentClients(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+func TestHelloCarriesServerIdentity(t *testing.T) {
+	id, err := identity.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	addr, _ := startServerWithID(t, id)
+	conn, r := testConnect(t, addr)
+
+	srv, err := clientHandshake(conn, r)
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if srv.DeviceID != id.DeviceID {
+		t.Errorf("server advertised id %x, want %s", srv.DeviceID, id)
+	}
+}
+
+func TestIdentityStableAcrossRestart(t *testing.T) {
+	dir := t.TempDir() // plays the role of ~/.config/wideconnect
+
+	// First "run" of the daemon.
+	id1, err := identity.LoadOrCreate(dir)
+	if err != nil {
+		t.Fatalf("identity (run 1): %v", err)
+	}
+	addr1, stop1 := startServerWithID(t, id1)
+	conn1, r1 := testConnect(t, addr1)
+	srv1, err := clientHandshake(conn1, r1)
+	if err != nil {
+		t.Fatalf("handshake (run 1): %v", err)
+	}
+	stop1()
+
+	// Second "run": reload from the same directory, as a restart would.
+	id2, err := identity.LoadOrCreate(dir)
+	if err != nil {
+		t.Fatalf("identity (run 2): %v", err)
+	}
+	addr2, _ := startServerWithID(t, id2)
+	conn2, r2 := testConnect(t, addr2)
+	srv2, err := clientHandshake(conn2, r2)
+	if err != nil {
+		t.Fatalf("handshake (run 2): %v", err)
+	}
+
+	if srv1.DeviceID != srv2.DeviceID {
+		t.Errorf("device id changed across restart: %x -> %x", srv1.DeviceID, srv2.DeviceID)
 	}
 }
