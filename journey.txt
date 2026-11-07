@@ -1,6 +1,17 @@
-Project begins today:
-date: Nov 5 2026 (3:29PM IST)
-got git into my VScode (6:27PM IST)
+My WideConnect Journey
+======================
 
-Uploaded 9 files now
-date: Nov 6 2026 (7:12PM IST)
+November 5, 2026: I started WideConnect and uploaded the project basics under
+"Initial commit." I added the project idea to the README under "Enhance README
+with project idea and features," then started this journey log under
+"Initialize journey.txt with project start details."
+
+November 6, 2026: I wrote the protocol outline under "protocol version," added
+frame handling and tests under "framing" and "testing," and created the TCP
+server under "server." I then uploaded the Go commands, HELLO handshake,
+identity tests, and related updates under "9filesnewmod."
+
+November 7, 2026: I added device identity, paired-device storage, and the
+pairing protocol under "13commit." I refined the pairing messages under
+"protocol: Add pairing protocol and identity management," then added the
+pairing flow and server session states under "7commit."
