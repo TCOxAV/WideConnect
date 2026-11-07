@@ -39,12 +39,23 @@ Both sides now compute the same 6-digit code:
 
 Each user compares the code on both screens.
 
-4. Each side sends PAIR_DECISION (1 byte: 1 = accept, 0 = reject).
-   A pairing is stored only if BOTH sides accept.
+4. The initiator sends PAIR_DECISION first (1 = accept, 0 = reject).
+   - If it is 0, the pairing is over. The responder sends nothing.
+   - If it is 1, the responder answers with its own PAIR_DECISION.
+   A device is stored only if BOTH decisions are 1. A user who does not
+   decide within 60 seconds counts as rejecting.
 
-Why the commitment: without step 1, an attacker could try many keys until the
-6-digit code collides. Committing to the key first means the attacker gets one
-guess per attempt (about 1 in 1,000,000), and a failed attempt is visible to the user.
+Checks that abort the pairing:
+
+- The revealed key and nonce do not match the earlier commitment.
+- The peer presents our own public key.
+- SHA-256(peer public key)[:16] is not the DeviceID the peer sent in its HELLO.
+- Any frame other than the expected next one arrives (for example PING
+  during pairing), or a payload has the wrong length.
+
+Pairing does not prove that the peer holds the private key. The first AUTH
+exchange after pairing does: a peer that paired with a key it does not own
+cannot sign the challenge.
 
 ## Storage: paired.json (same directory as identity.json)
 
@@ -67,11 +78,15 @@ from being reused in a different session.
 
 ## Session states
 
-| State          | Allowed frames                                         |
-|----------------|--------------------------------------------------------|
-| Connected      | HELLO only                                             |
-| Greeted        | PAIR_*, AUTH_*, PING/PONG                              |
-| Authenticated  | everything, including NOTIFY, FILE_*, SCREEN           |
+| State          | Allowed frames                                              |
+|----------------|-------------------------------------------------------------|
+| Connected      | HELLO only                                                  |
+| Greeted        | PING, PONG, ERROR, PAIR_*, AUTH_*                           |
+| Authenticated  | everything except HELLO (including NOTIFY, FILE_*, SCREEN)  |
+
+A frame that is not allowed in the current state, and any frame with an
+unknown message type, MUST close the connection. States only move forward
+one step at a time: Connected, Greeted, Authenticated.
 
 ## New message types
 

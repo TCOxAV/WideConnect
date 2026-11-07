@@ -4,6 +4,8 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TCOxAV/WideConnect/internal/identity"
@@ -20,25 +23,36 @@ import (
 
 // handshakeTimeout is how long a new peer has to complete the HELLO exchange.
 const handshakeTimeout = 5 * time.Second
+const authenticationTimeout = 5 * time.Second
 
 // Server listens for WideConnect peers.
 type Server struct {
 	addr         string
 	id           identity.Identity
+	paired       *identity.PairedStore
 	helloPayload []byte // our own HELLO, encoded once at startup
 	wg           sync.WaitGroup
 }
 
-// New returns a Server that will listen on addr (e.g. ":7777").
+// New returns a Server that will listen on addr (e.g. ":7777")
+// and identify itself to peers as id.
 func New(addr string, id identity.Identity) *Server {
 	return &Server{addr: addr, id: id}
 }
 
+// NewWithPairedStore returns a Server that verifies peers against paired.
+// A nil store fails closed for authentication attempts.
+func NewWithPairedStore(addr string, id identity.Identity, paired *identity.PairedStore) *Server {
+	return &Server{addr: addr, id: id, paired: paired}
+}
+
 // session wraps a connection with a write lock, so several goroutines
-// (ping replies, notifications, file chunks...) can send safely.
+// (ping replies, notifications, file chunks...) can send safely, and
+// tracks how far the connection has progressed.
 type session struct {
-	conn net.Conn
-	mu   sync.Mutex
+	conn  net.Conn
+	mu    sync.Mutex
+	state atomic.Uint32 // holds a State; the zero value is StateConnected
 }
 
 func (s *session) send(f protocol.Frame) error {
@@ -47,8 +61,21 @@ func (s *session) send(f protocol.Frame) error {
 	return protocol.WriteFrame(s.conn, f)
 }
 
-// buildHello creates this device's identity.
-// TODO: persist the DeviceID on disk so it survives restarts (needed for pairing).
+// State returns the session's current state.
+func (s *session) State() State {
+	return State(s.state.Load())
+}
+
+// advance moves the session forward by exactly one state. It returns false,
+// changing nothing, if the session is not currently in from, or if to is
+// not the very next state. States never move backwards or skip ahead.
+func (s *session) advance(from, to State) bool {
+	if to != from+1 || to > StateAuthenticated {
+		return false
+	}
+	return s.state.CompareAndSwap(uint32(from), uint32(to))
+}
+
 // buildHello creates this device's HELLO payload from its persistent identity.
 func buildHello(id identity.Identity) ([]byte, error) {
 	name, err := os.Hostname()
@@ -154,6 +181,87 @@ func (s *Server) handshake(sess *session, r io.Reader) (protocol.Hello, error) {
 	return peer, nil
 }
 
+// dispatch handles one frame that has already passed the state check.
+// A returned error means the connection should be closed.
+func (s *Server) dispatch(sess *session, remote net.Addr, peer protocol.Hello, r io.Reader, f protocol.Frame) error {
+	switch f.Type {
+	case protocol.TypePing:
+		return sess.send(protocol.Frame{Type: protocol.TypePong, Payload: f.Payload})
+	case protocol.TypePong:
+		return nil
+	case protocol.TypeAuthChallenge:
+		return s.authenticate(sess, r, peer, f)
+	case protocol.TypeAuthResponse:
+		return errors.New("unexpected AUTH_RESPONSE")
+	default:
+		// Allowed in this state, but not implemented yet.
+		log.Printf("[%s] unhandled frame type %#x in state %s", remote, f.Type, sess.State())
+		return nil
+	}
+}
+
+// authenticate completes the mutual challenge exchange after the peer has
+// sent its AUTH_CHALLENGE. The server sends its own challenge and signs the
+// peer's challenge, then verifies the peer's signature against the stored key.
+func (s *Server) authenticate(sess *session, r io.Reader, peer protocol.Hello, incoming protocol.Frame) error {
+	if sess.State() != StateGreeted {
+		return fmt.Errorf("authentication is invalid in state %s", sess.State())
+	}
+	if s.paired == nil {
+		return errors.New("authentication unavailable: paired store is not configured")
+	}
+	if peer.DeviceID == s.id.DeviceID {
+		return errors.New("authentication rejected: self-connection")
+	}
+	paired, ok := s.paired.Lookup(peer.DeviceID)
+	if !ok || identity.DeviceIDFromPublicKey(paired.PublicKey[:]) != peer.DeviceID {
+		return errors.New("authentication rejected: peer is not paired")
+	}
+	peerChallenge, err := protocol.UnmarshalAuthChallenge(incoming.Payload)
+	if err != nil {
+		return fmt.Errorf("authentication: bad challenge: %w", err)
+	}
+
+	if err := sess.conn.SetDeadline(time.Now().Add(authenticationTimeout)); err != nil {
+		return fmt.Errorf("authentication: setting deadline: %w", err)
+	}
+	defer sess.conn.SetDeadline(time.Time{})
+
+	var challenge protocol.AuthChallenge
+	if _, err := rand.Read(challenge.Challenge[:]); err != nil {
+		return fmt.Errorf("authentication: generating challenge: %w", err)
+	}
+	if err := sess.send(protocol.Frame{Type: protocol.TypeAuthChallenge, Payload: challenge.Marshal()}); err != nil {
+		return fmt.Errorf("authentication: sending challenge: %w", err)
+	}
+
+	message := protocol.AuthMessage(peerChallenge.Challenge, s.id.DeviceID, peer.DeviceID)
+	signature := s.id.Sign(message)
+	if err := sess.send(protocol.Frame{Type: protocol.TypeAuthResponse, Payload: signature}); err != nil {
+		return fmt.Errorf("authentication: sending response: %w", err)
+	}
+
+	responseFrame, err := protocol.ReadFrame(r)
+	if err != nil {
+		return fmt.Errorf("authentication: reading response: %w", err)
+	}
+	if responseFrame.Type != protocol.TypeAuthResponse {
+		return fmt.Errorf("authentication: expected AUTH_RESPONSE, got %#x", byte(responseFrame.Type))
+	}
+	response, err := protocol.UnmarshalAuthResponse(responseFrame.Payload)
+	if err != nil {
+		return fmt.Errorf("authentication: bad response: %w", err)
+	}
+	message = protocol.AuthMessage(challenge.Challenge, peer.DeviceID, s.id.DeviceID)
+	if !ed25519.Verify(paired.PublicKey[:], message, response.Signature[:]) {
+		return errors.New("authentication rejected: invalid signature")
+	}
+	if !sess.advance(StateGreeted, StateAuthenticated) {
+		return errors.New("authentication: could not enter authenticated state")
+	}
+	return nil
+}
+
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 	remote := conn.RemoteAddr()
@@ -187,6 +295,10 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		}
 		return
 	}
+	if !sess.advance(StateConnected, StateGreeted) {
+		log.Printf("[%s] internal error: could not enter %s", remote, StateGreeted)
+		return
+	}
 	log.Printf("[%s] handshake ok: name=%q platform=%d caps=%#x",
 		remote, peer.Name, peer.Platform, peer.Caps)
 
@@ -199,15 +311,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			return
 		}
 
-		switch f.Type {
-		case protocol.TypePing:
-			pong := protocol.Frame{Type: protocol.TypePong, Payload: f.Payload}
-			if err := sess.send(pong); err != nil {
-				log.Printf("[%s] write: %v", remote, err)
-				return
-			}
-		default:
-			log.Printf("[%s] unhandled frame type %#x", remote, f.Type)
+		if st := sess.State(); !allowed(st, f.Type) {
+			log.Printf("[%s] frame type %#x not allowed in state %s; closing", remote, f.Type, st)
+			return
+		}
+
+		if err := s.dispatch(sess, remote, peer, r, f); err != nil {
+			log.Printf("[%s] write: %v", remote, err)
+			return
 		}
 	}
 }
