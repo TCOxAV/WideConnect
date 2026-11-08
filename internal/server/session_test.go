@@ -181,3 +181,19 @@ func TestPairFramesAllowedWhenGreeted(t *testing.T) {
 		t.Fatalf("ping after pair frame: %v", err)
 	}
 }
+
+func TestAuthChallengeFailsClosedWhenPeerIsNotPaired(t *testing.T) {
+	addr, _ := startServer(t)
+	conn, r := testConnect(t, addr)
+
+	if _, err := clientHandshake(conn, r); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+
+	challenge := protocol.AuthChallenge{Challenge: [protocol.ChallengeSize]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}}
+	if err := protocol.WriteFrame(conn, protocol.Frame{Type: protocol.TypeAuthChallenge, Payload: challenge.Marshal()}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	expectClosed(t, r)
+}

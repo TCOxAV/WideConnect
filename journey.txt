@@ -15,3 +15,12 @@ November 7, 2026: I added device identity, paired-device storage, and the
 pairing protocol under "13commit." I refined the pairing messages under
 "protocol: Add pairing protocol and identity management," then added the
 pairing flow and server session states under "7commit."
+
+November 8, 2026: I continued the server-side auth gate and tightened the
+session-state rules under "server: mutual auth gate." I added the fail-closed
+challenge check so unpaired peers are rejected before feature frames are
+accepted.
+
+I then wired the daemon to the paired store so real peers authenticate against
+trusted keys in the running service, keeping the auth gate active in the
+production path.

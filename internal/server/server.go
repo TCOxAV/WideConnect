@@ -35,9 +35,10 @@ type Server struct {
 }
 
 // New returns a Server that will listen on addr (e.g. ":7777")
-// and identify itself to peers as id.
+// and identify itself to peers as id. A nil paired store means the server
+// will not authenticate peers until a store is injected.
 func New(addr string, id identity.Identity) *Server {
-	return &Server{addr: addr, id: id}
+	return NewWithPairedStore(addr, id, nil)
 }
 
 // NewWithPairedStore returns a Server that verifies peers against paired.

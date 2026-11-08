@@ -33,11 +33,16 @@ func main() {
 	}
 	log.Printf("device id: %s", id)
 
+	paired, err := identity.OpenPairedStore(dir)
+	if err != nil {
+		log.Fatalf("paired store: %v", err)
+	}
+
 	// Cancel the context on Ctrl+C or SIGTERM for a clean shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	srv := server.New(*addr, id)
+	srv := server.NewWithPairedStore(*addr, id, paired)
 	if err := srv.ListenAndServe(ctx); err != nil {
 		log.Fatalf("server: %v", err)
 	}
