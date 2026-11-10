@@ -64,17 +64,26 @@ A device is "paired" if its DeviceID is in this list and its key matches.
 
 ## Authentication on every later connection
 
-After the HELLO exchange, each side sends a fresh challenge and signs the other's:
+After HELLO, the connecting client initiates authentication:
 
-1. Both sides send AUTH_CHALLENGE: 16 random bytes.
-2. Each side replies AUTH_RESPONSE: Ed25519 signature (64 bytes) over
-       "WC-AUTH-v1" || challenge received || signer DeviceID || verifier DeviceID
-3. The verifier looks up the peer's DeviceID in paired.json, checks that the
-   HELLO DeviceID matches the stored key, and verifies the signature.
-4. On success the session is authenticated. On failure, close the connection.
+1. The client sends AUTH_CHALLENGE with 16 fresh random bytes.
+2. The server looks up the client's HELLO DeviceID in paired.json and closes
+    the connection if that device is not paired. It then sends its own fresh
+    AUTH_CHALLENGE and an AUTH_RESPONSE signing the client's challenge.
+3. The client checks the server ID and stored public key, verifies the server's
+    signature, and sends an AUTH_RESPONSE signing the server's challenge.
+4. The server verifies the client's signature using the stored public key and
+    enters Authenticated state. Invalid signatures or malformed messages close
+    the connection.
+5. The client sends a PING and requires the matching PONG before Dial reports
+    success. This confirms the server accepted its signature, since the server
+    only resumes dispatch after successful verification.
+
+Each signature is Ed25519 over
+         "WC-AUTH-v1" || challenge || signer DeviceID || verifier DeviceID
 
 Fresh challenges prevent replay. Including both DeviceIDs prevents a signature
-from being reused in a different session.
+from being reused for a different device pair.
 
 ## Session states
 

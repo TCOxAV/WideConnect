@@ -24,3 +24,12 @@ accepted.
 I then wired the daemon to the paired store so real peers authenticate against
 trusted keys in the running service, keeping the auth gate active in the
 production path.
+
+November 10, 2026: I added a shared authenticated client connection and moved
+wcping onto persistent identity and paired-device storage. The client verifies
+the server, signs the server's challenge, and confirms the server accepted the
+signature before reporting a successful connection. Integration tests cover
+mutual trust and rejection when either device is unpaired.
+
+I also made client connection setup honor context cancellation during the
+authentication exchange and added a test for a peer that stalls at that point.

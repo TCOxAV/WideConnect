@@ -2,86 +2,51 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
-	"net"
-	"os"
-	"runtime"
 	"time"
 
+	"github.com/TCOxAV/WideConnect/internal/client"
+	"github.com/TCOxAV/WideConnect/internal/identity"
 	"github.com/TCOxAV/WideConnect/protocol"
 )
 
-// handshake sends our HELLO, then reads and returns the peer's.
-func handshake(conn net.Conn, r *bufio.Reader) (protocol.Hello, error) {
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	defer conn.SetDeadline(time.Time{})
-
-	id, err := protocol.NewDeviceID()
-	if err != nil {
-		return protocol.Hello{}, err
-	}
-
-	name, err := os.Hostname()
-	if err != nil || name == "" {
-		name = "wcping"
-	}
-	if len(name) > protocol.MaxNameLen {
-		name = name[:protocol.MaxNameLen]
-	}
-
-	platform := protocol.PlatformUnknown
-	switch runtime.GOOS {
-	case "linux":
-		platform = protocol.PlatformLinux
-	case "windows":
-		platform = protocol.PlatformWindows
-	}
-
-	payload, err := protocol.Hello{DeviceID: id, Platform: platform, Name: name}.Marshal()
-	if err != nil {
-		return protocol.Hello{}, err
-	}
-	if err := protocol.WriteFrame(conn, protocol.Frame{Type: protocol.TypeHello, Payload: payload}); err != nil {
-		return protocol.Hello{}, fmt.Errorf("sending hello: %w", err)
-	}
-
-	f, err := protocol.ReadFrame(r)
-	if err != nil {
-		return protocol.Hello{}, fmt.Errorf("reading hello: %w", err)
-	}
-	if f.Type != protocol.TypeHello {
-		return protocol.Hello{}, fmt.Errorf("expected HELLO, got type %#x", f.Type)
-	}
-	return protocol.UnmarshalHello(f.Payload)
-}
-
 func main() {
 	addr := flag.String("addr", "127.0.0.1:7777", "peer address")
+	configDir := flag.String("config", "", "config directory (default: user config dir)")
 	count := flag.Int("n", 10, "number of pings")
 	interval := flag.Duration("i", 200*time.Millisecond, "interval between pings")
 	flag.Parse()
 
-	conn, err := net.DialTimeout("tcp", *addr, 3*time.Second)
+	dir := *configDir
+	if dir == "" {
+		var err error
+		dir, err = identity.DefaultDir()
+		if err != nil {
+			log.Fatalf("config: %v", err)
+		}
+	}
+	id, err := identity.LoadOrCreate(dir)
 	if err != nil {
-		log.Fatalf("dial: %v", err)
+		log.Fatalf("identity: %v", err)
+	}
+	paired, err := identity.OpenPairedStore(dir)
+	if err != nil {
+		log.Fatalf("paired store: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := client.Dial(ctx, *addr, id, paired)
+	if err != nil {
+		log.Fatalf("connect: %v", err)
 	}
 	defer conn.Close()
-
-	if tc, ok := conn.(*net.TCPConn); ok {
-		tc.SetNoDelay(true)
-	}
-	r := bufio.NewReader(conn)
-
-	peer, err := handshake(conn, r)
-	if err != nil {
-		log.Fatalf("handshake: %v", err)
-	}
-	fmt.Printf("connected to %q (platform=%d caps=%#x)\n", peer.Name, peer.Platform, peer.Caps)
+	fmt.Printf("connected to %q (platform=%d caps=%#x)\n", conn.Peer.Name, conn.Peer.Platform, conn.Peer.Caps)
 	fmt.Printf("PING %s\n", *addr)
 
 	var min, max, total time.Duration
@@ -93,11 +58,11 @@ func main() {
 		binary.BigEndian.PutUint64(payload, uint64(start.UnixNano()))
 
 		conn.SetDeadline(time.Now().Add(2 * time.Second))
-		if err := protocol.WriteFrame(conn, protocol.Frame{Type: protocol.TypePing, Payload: payload}); err != nil {
+		if err := conn.Send(protocol.Frame{Type: protocol.TypePing, Payload: payload}); err != nil {
 			log.Fatalf("write: %v", err)
 		}
 
-		f, err := protocol.ReadFrame(r)
+		f, err := conn.Receive()
 		rtt := time.Since(start) // monotonic clock, safe against wall-clock jumps
 		if err != nil {
 			log.Fatalf("read: %v", err)
