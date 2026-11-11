@@ -24,3 +24,11 @@ November 10, 2026: I moved into the client-side auth work under "6commit."
 I updated the paired-device flow, added the client auth code, and checked the
 connection and pairing behavior with tests so the client and server could trust
 each other properly.
+
+November 11, 2026: I optimized the pairing hash helpers after measuring their
+performance, reducing Commitment to zero allocations and cutting SASCode from
+three allocations to one. I also made frame writes report short writes, reject
+malformed PING/PONG payload lengths, and fixed wcping's handling of invalid
+ping counts. Regression tests cover the transport changes and the known pairing
+vectors still pass. The full race test suite, go vet, formatting check, and diff
+check all passed.
