@@ -4,8 +4,15 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"testing"
 )
+
+type shortFrameWriter struct{}
+
+func (shortFrameWriter) Write(p []byte) (int, error) {
+	return len(p) - 1, nil
+}
 
 func TestRoundTrip(t *testing.T) {
 	cases := []Frame{
@@ -75,6 +82,13 @@ func TestOversizeRejectedOnWrite(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Error("nothing should be written for an oversize frame")
+	}
+}
+
+func TestWriteFrameReportsShortWrite(t *testing.T) {
+	err := WriteFrame(shortFrameWriter{}, Frame{Type: TypePing, Payload: make([]byte, PingPayloadSize)})
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("WriteFrame error = %v, want %v", err, io.ErrShortWrite)
 	}
 }
 

@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	Magic      uint16 = 0x5743 // "WC"
-	Version    uint8  = 0x01
-	HeaderSize        = 8
-	MaxPayload        = 16 << 20 // 16 MiB
+	Magic           uint16 = 0x5743 // "WC"
+	Version         uint8  = 0x01
+	HeaderSize             = 8
+	MaxPayload             = 16 << 20 // 16 MiB
+	PingPayloadSize        = 8
 )
 
 // MsgType identifies what a frame's payload contains.
@@ -56,8 +57,14 @@ func WriteFrame(w io.Writer, f Frame) error {
 	binary.BigEndian.PutUint32(buf[4:8], uint32(len(f.Payload)))
 	copy(buf[HeaderSize:], f.Payload)
 
-	_, err := w.Write(buf)
-	return err
+	n, err := w.Write(buf)
+	if err != nil {
+		return err
+	}
+	if n != len(buf) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 // ReadFrame reads and validates exactly one frame from r.

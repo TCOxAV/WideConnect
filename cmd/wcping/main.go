@@ -21,6 +21,9 @@ func main() {
 	count := flag.Int("n", 10, "number of pings")
 	interval := flag.Duration("i", 200*time.Millisecond, "interval between pings")
 	flag.Parse()
+	if *count <= 0 {
+		log.Fatal("ping count must be greater than zero")
+	}
 
 	dir := *configDir
 	if dir == "" {
@@ -53,12 +56,12 @@ func main() {
 	received := 0
 
 	for i := 0; i < *count; i++ {
-		payload := make([]byte, 8)
+		var payload [protocol.PingPayloadSize]byte
 		start := time.Now()
-		binary.BigEndian.PutUint64(payload, uint64(start.UnixNano()))
+		binary.BigEndian.PutUint64(payload[:], uint64(start.UnixNano()))
 
 		conn.SetDeadline(time.Now().Add(2 * time.Second))
-		if err := conn.Send(protocol.Frame{Type: protocol.TypePing, Payload: payload}); err != nil {
+		if err := conn.Send(protocol.Frame{Type: protocol.TypePing, Payload: payload[:]}); err != nil {
 			log.Fatalf("write: %v", err)
 		}
 
@@ -67,7 +70,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("read: %v", err)
 		}
-		if f.Type != protocol.TypePong || !bytes.Equal(f.Payload, payload) {
+		if f.Type != protocol.TypePong || !bytes.Equal(f.Payload, payload[:]) {
 			log.Fatalf("bad reply: type=%#x payload=%v", f.Type, f.Payload)
 		}
 

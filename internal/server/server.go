@@ -187,8 +187,14 @@ func (s *Server) handshake(sess *session, r io.Reader) (protocol.Hello, error) {
 func (s *Server) dispatch(sess *session, remote net.Addr, peer protocol.Hello, r io.Reader, f protocol.Frame) error {
 	switch f.Type {
 	case protocol.TypePing:
+		if len(f.Payload) != protocol.PingPayloadSize {
+			return fmt.Errorf("invalid PING payload length %d", len(f.Payload))
+		}
 		return sess.send(protocol.Frame{Type: protocol.TypePong, Payload: f.Payload})
 	case protocol.TypePong:
+		if len(f.Payload) != protocol.PingPayloadSize {
+			return fmt.Errorf("invalid PONG payload length %d", len(f.Payload))
+		}
 		return nil
 	case protocol.TypeAuthChallenge:
 		return s.authenticate(sess, r, peer, f)

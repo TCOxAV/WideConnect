@@ -163,3 +163,22 @@ func TestAuthMessageBindsRoles(t *testing.T) {
 		t.Error("changing the challenge did not change the message")
 	}
 }
+
+var (
+	benchmarkCommitment [CommitmentSize]byte
+	benchmarkSASCode    string
+)
+
+func BenchmarkCommitment(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkCommitment = Commitment(kaPubA, kaNonceA)
+	}
+}
+
+func BenchmarkSASCode(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkSASCode = SASCode(kaPubA, kaPubB, kaNonceA, kaNonceB)
+	}
+}

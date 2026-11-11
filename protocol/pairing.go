@@ -3,7 +3,6 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
 )
 
 // Sizes of the values used by pairing and authentication.
@@ -22,12 +21,10 @@ const (
 // Commitment returns SHA-256(pub || nonce). The initiator sends this before
 // seeing the responder's key, so it cannot grind keys to force a chosen code.
 func Commitment(pub [PublicKeySize]byte, nonce [NonceSize]byte) [CommitmentSize]byte {
-	h := sha256.New()
-	h.Write(pub[:])
-	h.Write(nonce[:])
-	var out [CommitmentSize]byte
-	copy(out[:], h.Sum(nil))
-	return out
+	var input [PublicKeySize + NonceSize]byte
+	copy(input[:PublicKeySize], pub[:])
+	copy(input[PublicKeySize:], nonce[:])
+	return sha256.Sum256(input[:])
 }
 
 // SASCode returns the 6-digit code both users compare during pairing.
@@ -37,16 +34,21 @@ func Commitment(pub [PublicKeySize]byte, nonce [NonceSize]byte) [CommitmentSize]
 //	h    = SHA-256("WC-PAIR-v1" || pubA || pubB || nonceA || nonceB)
 //	code = (first 4 bytes of h, big-endian uint32) mod 1,000,000, zero-padded
 func SASCode(pubA, pubB [PublicKeySize]byte, nonceA, nonceB [NonceSize]byte) string {
-	h := sha256.New()
-	h.Write([]byte(sasLabel))
-	h.Write(pubA[:])
-	h.Write(pubB[:])
-	h.Write(nonceA[:])
-	h.Write(nonceB[:])
-	sum := h.Sum(nil)
+	var input [len(sasLabel) + 2*PublicKeySize + 2*NonceSize]byte
+	offset := copy(input[:], sasLabel)
+	offset += copy(input[offset:], pubA[:])
+	offset += copy(input[offset:], pubB[:])
+	offset += copy(input[offset:], nonceA[:])
+	copy(input[offset:], nonceB[:])
+	sum := sha256.Sum256(input[:])
 
 	n := binary.BigEndian.Uint32(sum[:4]) % 1_000_000
-	return fmt.Sprintf("%06d", n)
+	var code [6]byte
+	for i := len(code) - 1; i >= 0; i-- {
+		code[i] = '0' + byte(n%10)
+		n /= 10
+	}
+	return string(code[:])
 }
 
 // AuthMessage returns the bytes a device signs to prove its identity:

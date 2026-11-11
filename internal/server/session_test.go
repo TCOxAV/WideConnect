@@ -197,3 +197,18 @@ func TestAuthChallengeFailsClosedWhenPeerIsNotPaired(t *testing.T) {
 
 	expectClosed(t, r)
 }
+
+func TestMalformedPingRejected(t *testing.T) {
+	addr, _ := startServer(t)
+	conn, r := testConnect(t, addr)
+	if _, err := clientHandshake(conn, r); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if err := protocol.WriteFrame(conn, protocol.Frame{
+		Type:    protocol.TypePing,
+		Payload: make([]byte, 9),
+	}); err != nil {
+		t.Fatalf("write malformed ping: %v", err)
+	}
+	expectClosed(t, r)
+}
